@@ -1,11 +1,66 @@
-# TokenData Gateway
+from fastapi import FastAPI, Request, HTTPException
+import time
+import os
+import litellm
+from litellm import acompletion
 
-**An OpenAI-compatible gateway that hard-stops runaway API spend at a budget you set.**
+app = FastAPI(title="TokenData Gateway")
 
-Unlike observability tools that send you an email *after* you burn $80, TokenData Gateway acts as a FinOps execution layer. It intercepts requests, attributes costs to virtual keys, and blocks calls the moment a budget is exceeded.
+# 虚拟 Key 数据库 (生产环境需换成 SQLite)
+VIRTUAL_KEYS = {
+    "td_test_agent_01": {"budget": 1.00, "spent": 0.95} 
+}
 
-## How it works
-1. Generate a Virtual Key (`td_xxx`).
-2. Point your OpenAI SDK `base_url` to this gateway.
-3. Set a hard USD budget.
-4. The gateway returns `402 Payment Required` when the limit is hit.
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    # 1. 验证虚拟 Key
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid token")
+    
+    virtual_key = auth_header.split(" ")[1]
+    
+    if virtual_key not in VIRTUAL_KEYS:
+        raise HTTPException(status_code=403, detail="Unknown virtual key")
+    
+    # 2. 检查预算 (硬刹车)
+    key_data = VIRTUAL_KEYS[virtual_key]
+    if key_data["spent"] >= key_data["budget"]:
+        raise HTTPException(
+            status_code=402, 
+            detail=f"Budget exceeded. Limit: ${key_data['budget']}, Spent: ${key_data['spent']}"
+        )
+
+    body = await request.json()
+    
+    # 3. 转发请求
+    # 如果你在环境变量里配置了 OPENAI_API_KEY，就用真实的，否则用 Mock 演示
+    api_key = os.environ.get("OPENAI_API_KEY")
+    
+    if not api_key:
+        # --- 演示模式 (无真实 Key) ---
+        estimated_cost = 0.06
+        VIRTUAL_KEYS[virtual_key]["spent"] += estimated_cost
+        return {
+            "id": "chatcmpl-mock",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": body.get("model", "gpt-3.5-turbo"),
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Mock response (No API Key configured)."},
+                "finish_reason": "stop"
+            }]
+        }
+    else:
+        # --- 真实转发模式 (通过 LiteLLM) ---
+        try:
+            response = await acompletion(**body, api_key=api_key)
+            
+            # 计算真实成本并结算
+            cost = litellm.completion_cost(completion_response=response)
+            VIRTUAL_KEYS[virtual_key]["spent"] += cost
+            
+            return response
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
