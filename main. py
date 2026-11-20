@@ -1,0 +1,45 @@
+from fastapi import FastAPI, Request, HTTPException
+from pydantic import BaseModel
+import time
+
+app = FastAPI(title="TokenData Gateway")
+
+# 模拟数据库：虚拟Key的额度配置
+VIRTUAL_KEYS = {
+    "td_test_agent_01": {"budget": 1.00, "spent": 0.95} # 额度1美元，已用0.95
+}
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    
+    virtual_key = auth_header.split(" ")[1]
+    
+    if virtual_key not in VIRTUAL_KEYS:
+        raise HTTPException(status_code=403, detail="Unknown key")
+    
+    key_data = VIRTUAL_KEYS[virtual_key]
+    
+    if key_data["spent"] >= key_data["budget"]:
+        raise HTTPException(
+            status_code=402, 
+            detail=f"Budget exceeded. Limit: ${key_data['budget']}, Spent: ${key_data['spent']}"
+        )
+
+    body = await request.json()
+    estimated_cost = 0.06
+    VIRTUAL_KEYS[virtual_key]["spent"] += estimated_cost
+
+    return {
+        "id": "chatcmpl-mock",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": body.get("model", "gpt-3.5-turbo"),
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "Mock response."},
+            "finish_reason": "stop"
+        }]
+    }
